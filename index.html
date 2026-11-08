@@ -92,6 +92,8 @@ input:focus-visible, button:focus-visible { outline: 3px solid var(--accent); ou
 /* Example banner */
 .examples { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px;
   background: var(--accent-soft); border-radius: 10px; padding: 10px 14px; font-size: 0.95rem; }
+.tools { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.btn-primary:disabled { opacity: .6; cursor: wait; }
 .link-btn { font: inherit; font-weight: 700; color: var(--fg); background: none; border: 1px solid var(--line); border-radius: 8px; padding: 6px 12px; cursor: pointer; background: var(--surface); }
 
 /* Toolbar */
@@ -171,7 +173,7 @@ img { max-width: 100%; }
     <div class="today" id="today"></div>
   </header>
 
-  <p class="storage-warn" id="storageWarn" hidden>This browser is blocking storage, so actions will be lost when you close the page.</p>
+  <p class="storage-warn" id="status" role="alert" hidden></p>
 
   <section class="summary" aria-label="Summary">
     <div class="stat open"><div class="label">Open</div><div class="num" id="nOpen">0</div><div class="note">still to do</div></div>
@@ -195,7 +197,7 @@ img { max-width: 100%; }
         <label for="fDue">Due date</label>
         <input type="date" id="fDue">
       </div>
-      <button type="submit" class="btn-primary">Add action</button>
+      <button type="submit" class="btn-primary" id="addBtn">Add action</button>
     </div>
     <p class="form-msg" id="formMsg" role="alert"></p>
   </form>
@@ -208,10 +210,13 @@ img { max-width: 100%; }
   <section>
     <div class="toolbar">
       <h2>By owner</h2>
+      <div class="tools">
+      <button type="button" class="link-btn" id="refreshBtn">Refresh</button>
       <div class="seg" role="group" aria-label="Filter">
         <button type="button" data-filter="all" aria-pressed="true">All</button>
         <button type="button" data-filter="open" aria-pressed="false">Open</button>
         <button type="button" data-filter="overdue" aria-pressed="false">Overdue</button>
+      </div>
       </div>
     </div>
   </section>
@@ -221,9 +226,11 @@ img { max-width: 100%; }
 
 <div class="toast" id="toast" hidden><span id="toastMsg"></span><button type="button" id="undoBtn">Undo</button></div>
 
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
 <script>
 (function () {
-  const KEY = "meeting-action-tracker-v1";
+  const SUPABASE_URL = "https://htvpljrhdgsicivvvqzd.supabase.co";
+  const SUPABASE_KEY = "sb_publishable_f__-k8p5YEUnz2dNBD0BmQ_k56Pmnw7";
   const FKEY = "meeting-action-tracker-filter";
   const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
   const $ = id => document.getElementById(id);
@@ -231,11 +238,6 @@ img { max-width: 100%; }
   function todayISO() {
     const d = new Date();
     return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
-  }
-  function addDays(iso, n) {
-    const [y, m, d] = iso.split("-").map(Number);
-    const dt = new Date(y, m - 1, d + n);
-    return dt.getFullYear() + "-" + String(dt.getMonth() + 1).padStart(2, "0") + "-" + String(dt.getDate()).padStart(2, "0");
   }
   function fmt(iso) {
     const [y, m, d] = iso.split("-").map(Number);
@@ -245,35 +247,38 @@ img { max-width: 100%; }
     const pa = a.split("-").map(Number), pb = b.split("-").map(Number);
     return Math.round((Date.UTC(pb[0], pb[1] - 1, pb[2]) - Date.UTC(pa[0], pa[1] - 1, pa[2])) / 86400000);
   }
-  function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
 
-  let storageOk = true;
-  function load() {
-    try {
-      const raw = localStorage.getItem(KEY);
-      return raw ? JSON.parse(raw) : null;
-    } catch (e) { storageOk = false; return null; }
-  }
-  function save() {
-    try { localStorage.setItem(KEY, JSON.stringify(actions)); }
-    catch (e) { storageOk = false; $("storageWarn").hidden = false; }
-  }
+  let db = null;
+  try { db = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY); } catch (e) { db = null; }
 
-  const T = todayISO();
-  function examples() {
-    return [
-      { id: uid(), title: "Share revised Q1 budget with finance", owner: "Priya", due: addDays(T, -3), done: false, example: true },
-      { id: uid(), title: "Book room for the planning workshop", owner: "Priya", due: addDays(T, 4), done: false, example: true },
-      { id: uid(), title: "Circulate meeting notes to the team", owner: "Priya", due: addDays(T, -5), done: true, example: true },
-      { id: uid(), title: "Draft onboarding checklist for new hires", owner: "Marcus", due: addDays(T, 0), done: false, example: true },
-      { id: uid(), title: "Confirm vendor quote for laptops", owner: "Marcus", due: addDays(T, -1), done: false, example: true },
-      { id: uid(), title: "Update the project timeline slide", owner: "Wei Ling", due: addDays(T, 7), done: false, example: true },
-      { id: uid(), title: "Follow up on client feedback", owner: "Wei Ling", due: addDays(T, -2), done: true, example: true }
-    ];
+  let actions = [];
+  let loaded = false;
+  let T = todayISO();
+
+  function setStatus(msg) {
+    $("status").textContent = msg || "";
+    $("status").hidden = !msg;
   }
 
-  let actions = load();
-  if (!Array.isArray(actions)) { actions = examples(); save(); }
+  function fromRow(r) {
+    return { id: r.id, title: r.title, owner: r.owner, due: r.due, done: r.done, example: r.is_example };
+  }
+
+  async function fetchAll() {
+    if (!db) { setStatus("Couldn't load the database library. Check your internet connection and reload the page."); return; }
+    const { data, error } = await db.from("actions").select("*").order("due", { ascending: true });
+    if (error) { setStatus("Couldn't load actions: " + error.message + ". Reload the page to try again."); return; }
+    actions = data.map(fromRow);
+    loaded = true;
+    setStatus("");
+    render();
+  }
+
+  async function run(op, failMsg) {
+    const { error } = await op;
+    if (error) { setStatus(failMsg + " " + error.message); await fetchAll(); return false; }
+    return true;
+  }
 
   let filter = "all";
   try { filter = localStorage.getItem(FKEY) || "all"; } catch (e) {}
@@ -281,8 +286,8 @@ img { max-width: 100%; }
   function isOverdue(a) { return !a.done && a.due < T; }
 
   function render() {
+    T = todayISO();
     $("today").textContent = "Today: " + fmt(T);
-    $("storageWarn").hidden = storageOk;
 
     const open = actions.filter(a => !a.done).length;
     const done = actions.length - open;
@@ -297,10 +302,20 @@ img { max-width: 100%; }
 
     document.querySelectorAll(".seg button").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.filter === filter)));
 
-    // owner suggestions
-    const names = [...new Set(actions.map(a => a.owner))].sort((a, b) => a.localeCompare(b));
+    const names = [...new Set(actions.map(a => a.owner.trim()))].sort((a, b) => a.localeCompare(b));
     $("ownerList").innerHTML = "";
     names.forEach(n => { const o = document.createElement("option"); o.value = n; $("ownerList").appendChild(o); });
+
+    const host = $("owners");
+    host.innerHTML = "";
+
+    if (!loaded) {
+      const e = document.createElement("div");
+      e.className = "empty"; e.style.gridColumn = "1 / -1";
+      e.innerHTML = "<strong>Loading actions…</strong>Fetching the team's list.";
+      host.appendChild(e);
+      return;
+    }
 
     const shown = actions.filter(a => filter === "all" ? true : filter === "open" ? !a.done : isOverdue(a));
     const groups = new Map();
@@ -310,13 +325,9 @@ img { max-width: 100%; }
       groups.get(k).items.push(a);
     });
 
-    const host = $("owners");
-    host.innerHTML = "";
-
     if (groups.size === 0) {
       const e = document.createElement("div");
-      e.className = "empty";
-      e.style.gridColumn = "1 / -1";
+      e.className = "empty"; e.style.gridColumn = "1 / -1";
       if (!actions.length) e.innerHTML = "<strong>No actions yet</strong>Add the first action from your meeting using the form above.";
       else if (filter === "overdue") e.innerHTML = "<strong>Nothing overdue</strong>Every open action is still within its due date.";
       else e.innerHTML = "<strong>All done</strong>There are no open actions right now.";
@@ -324,7 +335,6 @@ img { max-width: 100%; }
       return;
     }
 
-    // owners with most overdue first, then most open, then name
     const sorted = [...groups.values()].sort((g1, g2) => {
       const o1 = g1.items.filter(isOverdue).length, o2 = g2.items.filter(isOverdue).length;
       if (o1 !== o2) return o2 - o1;
@@ -360,7 +370,10 @@ img { max-width: 100%; }
         const cb = document.createElement("input");
         cb.type = "checkbox"; cb.className = "tick"; cb.checked = a.done; cb.id = "cb-" + a.id;
         cb.setAttribute("aria-label", "Mark done: " + a.title);
-        cb.addEventListener("change", () => { a.done = cb.checked; save(); render(); });
+        cb.addEventListener("change", async () => {
+          a.done = cb.checked; render();
+          await run(db.from("actions").update({ done: a.done }).eq("id", a.id), "Couldn't save that change.");
+        });
 
         const txt = document.createElement("div"); txt.className = "a-text";
         const t = document.createElement("label"); t.className = "a-title"; t.htmlFor = cb.id; t.textContent = a.title; t.style.display = "block"; t.style.cursor = "pointer";
@@ -391,15 +404,16 @@ img { max-width: 100%; }
     });
   }
 
-  // undo-able delete
+  // Delete with undo: re-inserts the same row (same id) if Undo is pressed
   let lastDeleted = null, toastTimer = null;
-  function removeAction(id) {
+  async function removeAction(id) {
     const idx = actions.findIndex(a => a.id === id);
     if (idx < 0) return;
-    lastDeleted = { item: actions[idx], idx };
+    lastDeleted = actions[idx];
     actions.splice(idx, 1);
-    save(); render();
+    render();
     showToast("Action deleted");
+    await run(db.from("actions").delete().eq("id", id), "Couldn't delete that action.");
   }
   function showToast(msg) {
     $("toastMsg").textContent = msg;
@@ -407,12 +421,15 @@ img { max-width: 100%; }
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => { $("toast").hidden = true; lastDeleted = null; }, 6000);
   }
-  $("undoBtn").addEventListener("click", () => {
-    if (lastDeleted) { actions.splice(lastDeleted.idx, 0, lastDeleted.item); lastDeleted = null; save(); render(); }
+  $("undoBtn").addEventListener("click", async () => {
     $("toast").hidden = true;
+    if (!lastDeleted) return;
+    const a = lastDeleted; lastDeleted = null;
+    const ok = await run(db.from("actions").insert({ id: a.id, title: a.title, owner: a.owner, due: a.due, done: a.done, is_example: !!a.example }), "Couldn't restore that action.");
+    if (ok) await fetchAll();
   });
 
-  $("addForm").addEventListener("submit", e => {
+  $("addForm").addEventListener("submit", async e => {
     e.preventDefault();
     const title = $("fTitle").value.trim();
     const owner = $("fOwner").value.trim();
@@ -426,20 +443,26 @@ img { max-width: 100%; }
       (!title ? $("fTitle") : !owner ? $("fOwner") : $("fDue")).focus();
       return;
     }
-    // reuse existing owner spelling if names match ignoring case
     const existing = actions.find(a => a.owner.trim().toLowerCase() === owner.toLowerCase());
-    actions.push({ id: uid(), title, owner: existing ? existing.owner.trim() : owner, due, done: false });
-    save();
+    const btn = $("addBtn");
+    btn.disabled = true; btn.textContent = "Adding…";
+    const { data, error } = await db.from("actions").insert({ title, owner: existing ? existing.owner.trim() : owner, due }).select().single();
+    btn.disabled = false; btn.textContent = "Add action";
+    if (error) { $("formMsg").textContent = "Couldn't add the action: " + error.message; return; }
+    actions.push(fromRow(data));
     $("formMsg").textContent = "";
     $("fTitle").value = "";
     $("fTitle").focus();
     render();
   });
 
-  $("clearEx").addEventListener("click", () => {
+  $("clearEx").addEventListener("click", async () => {
     actions = actions.filter(a => !a.example);
-    save(); render();
+    render();
+    await run(db.from("actions").delete().eq("is_example", true), "Couldn't remove the examples.");
   });
+
+  $("refreshBtn").addEventListener("click", fetchAll);
 
   document.querySelectorAll(".seg button").forEach(b => b.addEventListener("click", () => {
     filter = b.dataset.filter;
@@ -447,7 +470,12 @@ img { max-width: 100%; }
     render();
   }));
 
+  // Keep the list fresh when teammates make changes
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) fetchAll(); });
+  setInterval(() => { if (!document.hidden) fetchAll(); }, 30000);
+
   render();
+  fetchAll();
 })();
 </script>
 </body>
