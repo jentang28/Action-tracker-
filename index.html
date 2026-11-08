@@ -77,7 +77,7 @@ h1 span { color: var(--accent); }
 .fields { display: grid; grid-template-columns: 2fr 1fr 1fr auto; gap: 12px; align-items: end; }
 .field { display: grid; gap: 4px; min-width: 0; }
 .field label { font-size: 0.85rem; font-weight: 700; color: var(--muted); letter-spacing: 0.02em; }
-input[type="text"], input[type="date"] {
+input[type="text"], input[type="date"], input[type="password"] {
   font: inherit; font-size: 1.05rem; color: var(--fg); background: var(--bg);
   border: 1px solid var(--line); border-radius: 10px; padding: 11px 12px; width: 100%; min-height: 50px;
 }
@@ -140,6 +140,19 @@ li.action.done .a-due { color: var(--done); }
 .toast button { font: inherit; font-weight: 700; color: var(--accent); background: none; border: 0; cursor: pointer; }
 .storage-warn { color: var(--danger); font-size: 0.95rem; margin: 0; }
 
+/* Sign-in and account */
+.login-wrap { max-width: 420px; margin: 8vh auto 0; display: grid; gap: 20px; }
+.login-card, .pw-card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 24px; display: grid; gap: 14px; }
+.login-card h2, .pw-card h2 { font-family: var(--font-display); font-size: 1.35rem; margin: 0; }
+.login-card .btn-primary, .pw-card .btn-primary { width: 100%; }
+.hint { margin: 0; color: var(--muted); font-size: 0.95rem; }
+.account { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; justify-content: flex-end; font-size: 1rem; color: var(--muted); }
+.account strong { color: var(--fg); }
+.pw-card { max-width: 520px; }
+.pw-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+.pw-actions .btn-primary { width: auto; }
+.ok-msg { margin: 0; color: var(--fg); background: var(--accent-soft); border-radius: 8px; padding: 8px 12px; font-size: 0.95rem; }
+
 @media (max-width: 760px) {
   .fields { grid-template-columns: 1fr 1fr; }
   .fields .f-title { grid-column: 1 / -1; }
@@ -164,14 +177,63 @@ img { max-width: 100%; }
 </head>
 <body>
 
-<div class="wrap">
+<div class="login-wrap" id="loginView" hidden>
+  <div>
+    <h1>Meeting <span>actions</span></h1>
+    <p class="sub">Sign in to see and update your team's actions.</p>
+  </div>
+  <form class="login-card" id="loginForm" novalidate>
+    <h2>Sign in</h2>
+    <div class="field">
+      <label for="lUser">Username</label>
+      <input type="text" id="lUser" autocomplete="username" autocapitalize="none" spellcheck="false" placeholder="e.g. priya">
+    </div>
+    <div class="field">
+      <label for="lPass">Password</label>
+      <input type="password" id="lPass" autocomplete="current-password">
+    </div>
+    <button type="submit" class="btn-primary" id="loginBtn">Sign in</button>
+    <p class="form-msg" id="loginMsg" role="alert"></p>
+    <p class="hint">Forgotten your password? Ask your admin to reset it.</p>
+  </form>
+</div>
+
+<p class="hint" id="bootMsg" style="text-align:center;padding-top:20vh">Loading…</p>
+
+<div class="wrap" id="appView" hidden>
   <header>
     <div>
       <h1>Meeting <span>actions</span></h1>
       <p class="sub">What we agreed, who owns it, and when it's due.</p>
     </div>
-    <div class="today" id="today"></div>
+    <div>
+      <div class="account">
+        <span>Signed in as <strong id="whoName"></strong></span>
+        <button type="button" class="link-btn" id="pwToggle">Change password</button>
+        <button type="button" class="link-btn" id="signOutBtn">Sign out</button>
+      </div>
+      <div class="today" id="today" style="text-align:right;margin-top:6px"></div>
+    </div>
   </header>
+
+  <form class="pw-card" id="pwForm" novalidate hidden>
+    <h2>Change your password</h2>
+    <div class="field">
+      <label for="pNew">New password</label>
+      <input type="password" id="pNew" autocomplete="new-password">
+    </div>
+    <div class="field">
+      <label for="pConfirm">Confirm new password</label>
+      <input type="password" id="pConfirm" autocomplete="new-password">
+    </div>
+    <p class="hint">At least 8 characters.</p>
+    <div class="pw-actions">
+      <button type="submit" class="btn-primary" id="pwBtn">Save password</button>
+      <button type="button" class="link-btn" id="pwCancel">Cancel</button>
+    </div>
+    <p class="form-msg" id="pwMsg" role="alert"></p>
+  </form>
+  <p class="ok-msg" id="pwOk" hidden>Password updated.</p>
 
   <p class="storage-warn" id="status" role="alert" hidden></p>
 
@@ -232,6 +294,7 @@ img { max-width: 100%; }
   const SUPABASE_URL = "https://htvpljrhdgsicivvvqzd.supabase.co";
   const SUPABASE_KEY = "sb_publishable_f__-k8p5YEUnz2dNBD0BmQ_k56Pmnw7";
   const FKEY = "meeting-action-tracker-filter";
+  const EMAIL_DOMAIN = "actiontracker.local";
   const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
   const $ = id => document.getElementById(id);
 
@@ -253,6 +316,9 @@ img { max-width: 100%; }
 
   let actions = [];
   let loaded = false;
+  let profiles = [];
+  let me = null;
+  let pollTimer = null;
   let T = todayISO();
 
   function setStatus(msg) {
@@ -266,8 +332,14 @@ img { max-width: 100%; }
 
   async function fetchAll() {
     if (!db) { setStatus("Couldn't load the database library. Check your internet connection and reload the page."); return; }
-    const { data, error } = await db.from("actions").select("*").order("due", { ascending: true });
-    if (error) { setStatus("Couldn't load actions: " + error.message + ". Reload the page to try again."); return; }
+    if (!me) return;
+    const [res, pres] = await Promise.all([
+      db.from("actions").select("*").order("due", { ascending: true }),
+      db.from("profiles").select("id, username, display_name").order("display_name")
+    ]);
+    const { data, error } = res;
+    if (error) { setStatus("Couldn't load actions: " + error.message + ". Select Refresh to try again."); return; }
+    if (!pres.error) profiles = pres.data;
     actions = data.map(fromRow);
     loaded = true;
     setStatus("");
@@ -302,7 +374,7 @@ img { max-width: 100%; }
 
     document.querySelectorAll(".seg button").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.filter === filter)));
 
-    const names = [...new Set(actions.map(a => a.owner.trim()))].sort((a, b) => a.localeCompare(b));
+    const names = [...new Set(profiles.map(p => p.display_name).concat(actions.map(a => a.owner.trim())))].sort((a, b) => a.localeCompare(b));
     $("ownerList").innerHTML = "";
     names.forEach(n => { const o = document.createElement("option"); o.value = n; $("ownerList").appendChild(o); });
 
@@ -471,11 +543,91 @@ img { max-width: 100%; }
   }));
 
   // Keep the list fresh when teammates make changes
-  document.addEventListener("visibilitychange", () => { if (!document.hidden) fetchAll(); });
-  setInterval(() => { if (!document.hidden) fetchAll(); }, 30000);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden && me) fetchAll(); });
 
-  render();
-  fetchAll();
+  // ---- Sign in / sign out ----
+  function toEmail(u) {
+    u = u.trim().toLowerCase();
+    return u.includes("@") ? u : u + "@" + EMAIL_DOMAIN;
+  }
+
+  async function showSignedIn(user) {
+    me = user;
+    const meta = user.user_metadata || {};
+    $("whoName").textContent = meta.display_name || meta.username || (user.email || "").split("@")[0];
+    $("bootMsg").hidden = true;
+    $("loginView").hidden = true;
+    $("appView").hidden = false;
+    clearInterval(pollTimer);
+    pollTimer = setInterval(() => { if (!document.hidden) fetchAll(); }, 30000);
+    render();
+    await fetchAll();
+  }
+
+  function showSignedOut() {
+    me = null; actions = []; profiles = []; loaded = false;
+    clearInterval(pollTimer);
+    $("bootMsg").hidden = true;
+    $("appView").hidden = true;
+    $("pwForm").hidden = true; $("pwOk").hidden = true;
+    $("loginView").hidden = false;
+    $("lPass").value = "";
+    setStatus("");
+    setTimeout(() => $("lUser").focus(), 0);
+  }
+
+  $("loginForm").addEventListener("submit", async e => {
+    e.preventDefault();
+    const u = $("lUser").value.trim(), pw = $("lPass").value;
+    if (!u || !pw) { $("loginMsg").textContent = "Enter your username and password."; (!u ? $("lUser") : $("lPass")).focus(); return; }
+    if (!db) { $("loginMsg").textContent = "Couldn't connect. Check your internet connection and reload the page."; return; }
+    const btn = $("loginBtn"); btn.disabled = true; btn.textContent = "Signing in…";
+    const { data, error } = await db.auth.signInWithPassword({ email: toEmail(u), password: pw });
+    btn.disabled = false; btn.textContent = "Sign in";
+    if (error) {
+      $("loginMsg").textContent = /invalid/i.test(error.message) ? "That username and password don't match. Check them and try again." : "Couldn't sign in: " + error.message;
+      $("lPass").select();
+      return;
+    }
+    $("loginMsg").textContent = "";
+    showSignedIn(data.user);
+  });
+
+  $("signOutBtn").addEventListener("click", async () => {
+    await db.auth.signOut();
+    showSignedOut();
+  });
+
+  // ---- Change password ----
+  $("pwToggle").addEventListener("click", () => {
+    $("pwOk").hidden = true;
+    $("pwForm").hidden = !$("pwForm").hidden;
+    if (!$("pwForm").hidden) $("pNew").focus();
+  });
+  $("pwCancel").addEventListener("click", () => { $("pwForm").hidden = true; $("pNew").value = ""; $("pConfirm").value = ""; $("pwMsg").textContent = ""; });
+  $("pwForm").addEventListener("submit", async e => {
+    e.preventDefault();
+    const a = $("pNew").value, b = $("pConfirm").value;
+    if (a.length < 8) { $("pwMsg").textContent = "Use at least 8 characters."; $("pNew").focus(); return; }
+    if (a !== b) { $("pwMsg").textContent = "The two passwords don't match."; $("pConfirm").focus(); return; }
+    const btn = $("pwBtn"); btn.disabled = true; btn.textContent = "Saving…";
+    const { error } = await db.auth.updateUser({ password: a });
+    btn.disabled = false; btn.textContent = "Save password";
+    if (error) { $("pwMsg").textContent = "Couldn't change your password: " + error.message; return; }
+    $("pwMsg").textContent = ""; $("pNew").value = ""; $("pConfirm").value = "";
+    $("pwForm").hidden = true; $("pwOk").hidden = false;
+  });
+
+  // ---- Start ----
+  (async function boot() {
+    if (!db) { showSignedOut(); $("loginMsg").textContent = "Couldn't load the sign-in library. Check your internet connection and reload the page."; return; }
+    db.auth.onAuthStateChange((event, session) => {
+      if (event === "SIGNED_OUT") showSignedOut();
+    });
+    const { data } = await db.auth.getSession();
+    if (data && data.session) showSignedIn(data.session.user);
+    else showSignedOut();
+  })();
 })();
 </script>
 </body>
